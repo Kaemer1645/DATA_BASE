@@ -1,6 +1,8 @@
-from database import Database
-from os import getenv
 import click
+from database import Database
+from os import getenv,getcwd
+from repositories.urls import save, list_categories, list_urls
+
 
 
 
@@ -12,7 +14,7 @@ def cli():
 
 
 
-@click.command()
+@click.command(name='setup')
 def setup():
     print('I create new DataBase')
     db = Database(getenv('DB_NAME'))
@@ -21,29 +23,24 @@ def setup():
                           category text,
                            url text)''')
 
-@click.command()
+@click.command(name='add')
 @click.argument('category')
 @click.argument('url')
-def add(category, url):
+def add(category: str, url: str):
     print('I added new URL')
-    db = Database(getenv('DB_NAME'))
-    db.insert('URL_Storage', None, category, url)
+    save(category, url)
 
-@click.command()
+@click.command(name = 'categories')
 def category_list():
     print('This is list of categories')
-    db = Database(getenv('DB_NAME'))
-    categories = db.fetch_distinct('URL_Storage','category')
-    for name in categories:
-        print(name)
+    for name in list_categories():
+        print(name[0])
 
-@click.command()
+@click.command(name='category')
 @click.argument('category_name')
-def category(category_name):
-    print('List of url\'s from category: [' + str(category_name) + ']')
-    db = Database(getenv('DB_NAME'))
-    urls = db.display('URL_Storage', category=category_name)
-    for url in urls:
+def category(category_name: str):
+    print('List of url\'s from category: [' + category_name + ']')
+    for url in list_urls(category_name):
         print(url[2])
 
 

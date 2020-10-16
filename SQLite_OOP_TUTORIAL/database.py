@@ -22,8 +22,10 @@ class Database:
         self.connection.commit()
 
     def display(self,table, **kwargs):
-        return self.cursor.execute(f"SELECT * FROM {table} WHERE {' and '.join([f'{kwarg}=?' for kwarg in kwargs])}", tuple(kwargs.values()))
+        query = self.cursor.execute(f"SELECT * FROM {table} WHERE {' and '.join([f'{kwarg}=?' for kwarg in kwargs])}", tuple(kwargs.values()))
+        return query.fetchall()
 
     def fetch_distinct(self, table, column):
-        return self.cursor.execute(f"SELECT DISTINCT {column} FROM {table}")
+        query = self.cursor.execute(f"SELECT DISTINCT {column} FROM {table}")
+        return query.fetchall()
 
