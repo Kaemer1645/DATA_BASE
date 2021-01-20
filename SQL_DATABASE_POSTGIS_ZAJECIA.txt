@@ -1,0 +1,513 @@
+CREATE EXTENSION postgis;
+SELECT postgis_full_version();
+
+
+-- usuniecie kluczy glownych
+-- ALTER TABLE gminy_igolomia DROP CONSTRAINT gminy_igolomia_pkey;
+-- ALTER TABLE obreby_igolomia DROP CONSTRAINT obreby_igolomia_pkey;
+-- ALTER TABLE jednostki_ewidencyjne_igolomia DROP CONSTRAINT jednostki_ewidencyjne_igolomia_pkey;
+
+
+-- dodanie klucza glownego do gminy
+ALTER TABLE gminy_igolomia ADD COLUMN id_gminy varchar(6);
+UPDATE gminy_igolomia SET id_gminy=left(jpt_kod_je, 6);
+ALTER TABLE gminy_igolomia ADD PRIMARY KEY (id_gminy);
+
+
+-- stworzenie id_gminy dla jednostek i obrebow
+ALTER TABLE jednostki_ewidencyjne_igolomia ADD COLUMN id_gminy varchar(6);
+UPDATE jednostki_ewidencyjne_igolomia SET id_gminy=left(jpt_kod_je, 6);
+ALTER TABLE obreby_igolomia ADD COLUMN id_jednostki varchar(7);
+
+UPDATE obreby_igolomia SET id_jednostki=left(jpt_kod_je,6)||'2' WHERE substring(jpt_kod_je,8,1)='2';
+
+
+-- stworzenie kolumny id_jednostki dla polaczenia jednostek z obrebami
+ALTER TABLE jednostki_ewidencyjne_igolomia ADD COLUMN id_jednostki varchar(7);
+ALTER TABLE jednostki_ewidencyjne_igolomia ADD COLUMN type varchar(1);
+UPDATE jednostki_ewidencyjne_igolomia SET type=right(jpt_kod_je, 1);
+UPDATE jednostki_ewidencyjne_igolomia SET id_jednostki=left(jpt_kod_je,6)||right(jpt_kod_je,1) WHERE type = '1' or type = '2';
+
+ALTER TABLE jednostki_ewidencyjne_igolomia
+ALTER COLUMN id_jednostki TYPE varchar
+USING id_gminy::varchar;
+
+
+-- stworzenie kluczy glownych i kluczy obcych dla jednostek
+ALTER TABLE jednostki_ewidencyjne_igolomia ADD CONSTRAINT jedn_fkey FOREIGN KEY (id_gminy) REFERENCES gminy_igolomia;
+ALTER TABLE jednostki_ewidencyjne_igolomia ADD PRIMARY KEY (id_jednostki);
+ALTER TABLE obreby_igolomia ADD CONSTRAINT obreby_fkey FOREIGN KEY (id_jednostki) REFERENCES jednostki_ewidencyjne_igolomia;
+
+
+-- Stworzenie tabeli podsumowujacej wszystkie jednostki
+CREATE TABLE podsumowanie(jednostka varchar(255),
+    powierzchnia_ha int,
+    nazwa varchar(255),
+    kod_jedn_nadrz varchar(255));
+ALTER TABLE podsumowanie
+ALTER COLUMN powierzchnia_ha TYPE numeric;
+
+
+-- dodanie informacji do wierszy
+-- INSERT INTO podsumowanie VALUES ('gmina');
+-- INSERT INTO podsumowanie VALUES ('jednostka');
+-- INSERT INTO podsumowanie(jednostka) SELECT 'obreb' FROM generate_series(1,13);
+
+-- z powierzchnia, nazwa i kodami jednostek nadrzednych
+
+-- gmina
+INSERT INTO podsumowanie(jednostka, powierzchnia_ha, nazwa, kod_jedn_nadrz) SELECT 'gmina',round(cast(ST_Area(geom)/10000 as numeric),2),null,null FROM gminy_igolomia;
+
+-- jednostka
+INSERT INTO podsumowanie(jednostka, powierzchnia_ha, nazwa, kod_jedn_nadrz) SELECT 'jednostka ewidencyjna',round(cast(ST_Area(geom)/10000 as numeric),2),jpt_nazwa_,id_gminy FROM jednostki_ewidencyjne_igolomia;
+
+--obreby
+INSERT INTO podsumowanie(jednostka, powierzchnia_ha, nazwa, kod_jedn_nadrz) SELECT 'obreb_ewidencyjny',round(cast(ST_Area(geom)/10000 as numeric),2),jpt_nazwa_,id_jednostki FROM obreby_igolomia;
+SELECT * FROM podsumowanie;
+
+-- zajecia 23-11-2020 pytania proste, tabelaryczne
+
+-- zlaczenie dwoch tabel w jedna PRNG
+
+-- usuniecie funkc_adm
+ALTER TABLE miejscowosci_igolomia DROP COLUMN funkc_adm;
+CREATE TABLE prng AS (SELECT * FROM miejscowosci_igolomia
+UNION
+SELECT * FROM obiekty_fizjograficzne_igolomia);
+
+-- ile w gminie jest miejscowosci - miasto -wies
+SELECT count(*) FROM prng WHERE rodzaj_obi = 'wieś' OR rodzaj_obi = 'miasto';
+SELECT count(*) AS "miast i wsi w gminie Igolomia w PRNG" FROM prng WHERE rodzaj_obi = 'wieś' OR rodzaj_obi = 'miasto';
+select count(*) AS "miast i wsi w gminie Igolomia w BDOT10k" from igolomia_adms_p where x_kod = 'ADMS01' OR x_kod = 'ADMS03';
+
+-- podac info o powierzchni miejscowosci
+-- podac najwieksza miejscowosc z powierzchnia
+SELECT nazwa, round(cast(st_area(geom)/10000 as numeric),2) AS powierzchnia from igolomia_adms_a where x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07' ORDER BY powierzchnia DESC;
+
+-- Najwieksza miejscowosc: Wawrzeńczyce
+
+-- dla kontroli - suma powinna byc rowna powierzchni gminy
+SELECT sum(st_area(geom)/10000) AS powierzchnia from igolomia_adms_a where x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07' ORDER BY powierzchnia DESC;
+
+-- ile jest budynkow w najwiekszej miejscowosci w gminie
+-- korzystamy z dwoch tabel
+
+-- info o budynkach jest w bubd
+-- zeby to zrobic trzeba zlaczyc przestrzennie dwie klasy obiektow w tym przypadku - bubd i najwieksza miejscowosc
+SELECT count(*) FROM igolomia_bubd_a JOIN igolomia_adms_a ON ST_Intersects(igolomia_bubd_a.geom, igolomia_adms_a.geom) WHERE igolomia_adms_a.nazwa='Wawrzeńczyce';
+
+-- czy przez te najwieksza miejscowosc plynal jakies cieki - bez kategorii
+SELECT count(*) FROM igolomia_swrs_l JOIN igolomia_adms_a ON ST_Intersects(igolomia_swrs_l.geom, igolomia_adms_a.geom) WHERE igolomia_adms_a.nazwa='Wawrzeńczyce';
+
+-- id mphp - tez jest w PRNG jako nazwa cieku
+
+-- zad dom pyt 5
+-- ile budynkow mieszkalnych w najwiekszej miejscowosci znajduje sie w poblizu do 100m od ciekow
+
+-- zrobic bufor na 100m dla ciekow i przeciac z budynkami i policzyc countem
+
+-- zrobienie widoku z buforem rzek
+SELECT ST_UNION(ST_MULTI(ST_BUFFER(geom,50,'endcap=round join=round'))) FROM igolomia_swrs_l;
+CREATE VIEW rzeki_bufor AS SELECT ST_UNION(ST_MULTI(ST_BUFFER(geom,50,'endcap=round join=round'))) FROM igolomia_swrs_l;
+
+
+-- zrobienie widoku z budynkami w wawrzenczycach
+CREATE VIEW wawrzenczyce_budynki AS
+SELECT igolomia_bubd_a.id,igolomia_bubd_a.geom
+FROM igolomia_bubd_a
+JOIN igolomia_adms_a
+ON ST_Intersects(igolomia_bubd_a.geom, igolomia_adms_a.geom)
+WHERE igolomia_adms_a.nazwa='Wawrzeńczyce'
+AND
+(igolomia_bubd_a.x_kod = 'BUBD01' OR igolomia_bubd_a.x_kod = 'BUBD02' OR igolomia_bubd_a.x_kod = 'BUBD03' OR igolomia_bubd_a.x_kod = 'BUBD04');
+
+-- przeciecie obu widokow
+SELECT count(*) FROM wawrzenczyce_budynki JOIN rzeki_bufor ON ST_INTERSECTS(wawrzenczyce_budynki.geom, rzeki_bufor.st_union);
+
+
+-- zad dodatkowe
+-- zrobic widok ktora bedzie wypisywala cieki ktore maja nazwy oraz ich dlugosc na terenie gminy
+-- trzeba skorzystac z prng i bdot10k
+
+ALTER TABLE igolomia_swrs_l
+ADD COLUMN idmphp_var varchar(30);
+
+ALTER TABLE igolomia_swrs_l
+ALTER COLUMN idmphp_var TYPE varchar
+USING idmphp::varchar;
+
+CREATE VIEW rzeki_nazwy
+AS SELECT naz_glowna AS nazwa ,prng.rodzaj_obi AS prng_nazwa, prng.id_zew AS id_prng, igolomia_swrs_l.idmphp_var AS bdot10k_id, igolomia_swrs_l.geom AS geom
+FROM prng
+JOIN igolomia_swrs_l
+ON prng.id_zew = igolomia_swrs_l.idmphp_var;
+
+-- CREATE VIEW dlugosci
+CREATE VIEW cieki_dlugosci
+AS SELECT nazwa,round(cast(sum(ST_LENGTH(geom))as numeric) , 2)
+FROM rzeki_nazwy
+GROUP BY nazwa;
+
+SELECT nazwa,round(cast(sum(ST_LENGTH(geom))as numeric) , 2)
+FROM rzeki_nazwy
+GROUP BY nazwa;
+
+-- zrobienie widoki dla budynkow
+
+CREATE VIEW budynki_1
+AS SELECT igolomia_bubd_a.geom, igolomia_bubd_a.x_kod, igolomia_bubd_a.id
+FROM igolomia_bubd_a
+JOIN igolomia_adms_a ON ST_Intersects(igolomia_bubd_a.geom, igolomia_adms_a.geom)
+WHERE igolomia_adms_a.nazwa = 'Wawrzeńczyce' AND (igolomia_bubd_a.x_kod = 'BUBD01' OR igolomia_bubd_a.x_kod = 'BUBD02' OR igolomia_bubd_a.x_kod = 'BUBD03' OR igolomia_bubd_a.x_kod = 'BUBD04');
+select * from budynki_1;
+
+-- zrobienie widoki dla rzek
+CREATE VIEW rzeki_2
+AS SELECT ST_Buffer(igolomia_swrs_l.geom, 200) as geom, 'bufor 200 m' AS bufor
+FROM igolomia_swrs_l JOIN igolomia_adms_a
+ON ST_Intersects(igolomia_swrs_l.geom, igolomia_adms_a.geom)
+WHERE igolomia_adms_a.nazwa = 'Wawrzeńczyce';
+select * from rzeki_2;
+
+SELECT count( DISTINCT budynki_1.id)
+FROM rzeki_2
+JOIN budynki_1
+ON ST_Intersects( budynki_1.geom , rzeki_2.geom);
+
+
+-- selekcje zagniezdzone
+
+-- SELECT nazwa from adms_a where x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07' ORDER BY st_area(geom)/10000 DESC LIMIT 1;
+
+SELECT nazwa, round(cast(st_area(geom)/10000 as numeric),2) AS powierzchnia
+FROM igolomia_adms_a
+WHERE x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07'
+ORDER BY powierzchnia
+DESC LIMIT 1;
+
+SELECT nazwa, st_area(geom)/10000 AS powierzchnia
+FROM igolomia_adms_a
+WHERE x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07'
+ORDER BY powierzchnia DESC;
+
+-- SELECT count(*) FROM bubd JOIN adms_a ON ST_Intersects(bubd.geom,adms_a.geom) WHERE adms_a.nazwa = ( SELECT adms_a.nazwa from adms_a where x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07' ORDER BY st_area(geom)/10000 DESC LIMIT 1 );
+
+SELECT count(*)
+FROM igolomia_bubd_a
+JOIN igolomia_adms_a
+ON ST_Intersects(igolomia_bubd_a.geom, igolomia_adms_a.geom)
+WHERE igolomia_adms_a.nazwa = (SELECT round(cast(st_area(geom)/10000 as numeric),2) AS powierzchnia
+FROM igolomia_adms_a
+WHERE x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07'
+ORDER BY powierzchnia DESC LIMIT 1);
+
+SELECT count(DISTINCT igolomia_bubd_a.id )
+FROM igolomia_bubd_a
+JOIN igolomia_adms_a
+ON ST_Intersects(igolomia_bubd_a.geom, igolomia_adms_a.geom)
+JOIN igolomia_swrs_l
+ON ST_Intersects(ST_Buffer(igolomia_swrs_l.geom, 200), igolomia_bubd_a.geom)
+WHERE igolomia_adms_a.nazwa = 'Wawrzeńczyce' AND (igolomia_bubd_a.x_kod = 'BUBD01' OR igolomia_bubd_a.x_kod = 'BUBD02' OR igolomia_bubd_a.x_kod = 'BUBD03' OR igolomia_bubd_a.x_kod = 'BUBD04');
+
+
+SELECT count(DISTINCT igolomia_bubd_a.id ) FROM igolomia_bubd_a JOIN igolomia_adms_a ON ST_Intersects(igolomia_bubd_a.geom, igolomia_adms_a.geom) JOIN igolomia_swrs_l ON ST_Intersects(ST_Buffer(igolomia_bubd_a.geom, 200), igolomia_swrs_l.geom) WHERE igolomia_adms_a.nazwa = 'Wawrzeńczyce' AND (igolomia_bubd_a.x_kod = 'BUBD01' OR igolomia_bubd_a.x_kod = 'BUBD02' OR igolomia_bubd_a.x_kod = 'BUBD03' OR igolomia_bubd_a.x_kod = 'BUBD04');
+SELECT count(DISTINCT igolomia_bubd_a.id ) FROM igolomia_bubd_a JOIN igolomia_adms_a ON ST_Intersects(igolomia_bubd_a.geom, igolomia_adms_a.geom) JOIN igolomia_swrs_l ON ST_Intersects(ST_Buffer(igolomia_bubd_a.geom, 200), igolomia_swrs_l.geom) WHERE igolomia_adms_a.nazwa = (Select round(cast(st_area(geom)/10000 as numeric),2) AS powierzchnia from igolomia_adms_a where x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07' ORDER BY powierzchnia DESC LIMIT 1) AND (igolomia_bubd_a.x_kod = 'BUBD01' OR igolomia_bubd_a.x_kod = 'BUBD02' OR igolomia_bubd_a.x_kod = 'BUBD03' OR igolomia_bubd_a.x_kod = 'BUBD04');
+SELECT count(DISTINCT igolomia_bubd_a.id ) FROM igolomia_bubd_a JOIN igolomia_adms_a ON ST_Intersects(igolomia_bubd_a.geom, igolomia_adms_a.geom) JOIN igolomia_swrs_l ON ST_Intersects(ST_Buffer(igolomia_bubd_a.geom, 200), igolomia_swrs_l.geom) WHERE igolomia_adms_a.nazwa = (SELECT nazwa from igolomia_adms_a where x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07' ORDER BY st_area(geom/10000) DESC LIMIT 1) AND (igolomia_bubd_a.x_kod = 'BUBD01' OR igolomia_bubd_a.x_kod = 'BUBD02' OR igolomia_bubd_a.x_kod = 'BUBD03' OR igolomia_bubd_a.x_kod = 'BUBD04');
+
+
+SELECT idmphp, COUNT(*) AS "liczba obiektów" FROM igolomia_swrs_l GROUP BY idmphp;
+SELECT id_zew, COUNT(*) AS "liczba obiektów" FROM prng WHERE sys_zew = 'MPHP' GROUP BY id_zew;
+
+
+-- mphp - mapa podzialu hydrograficznego polski
+
+SELECT naz_glowna, rodz_repre, COUNT(*) AS "liczba obiektów"
+FROM prng
+WHERE sys_zew = 'MPHP'
+GROUP BY naz_glowna, rodz_repre;
+
+SELECT rodzaj_obi, COUNT(*) AS "liczba obiektów"
+FROM prng GROUP BY rodzaj_obi
+ORDER BY "liczba obiektów" DESC;
+
+SELECT prng.naz_glowna, igolomia_swrs_l.idmphp
+FROM prng
+JOIN igolomia_swrs_l
+ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(12);
+
+SELECT DISTINCT prng.naz_glowna, igolomia_swrs_l.idmphp
+FROM prng
+JOIN igolomia_swrs_l
+ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(12);
+
+
+-- joiny
+
+--  beitadmin.pl/kurs-postgresql-11-wstep-do-laczenia-tabel-przy-pomocy-joinsjoinow-cz-15
+
+-- INNER JOIN
+-- zbior A - PRNG     - zbior B to co po join
+SELECT prng.naz_glowna, igolomia_swrs_l.idmphp FROM prng JOIN igolomia_swrs_l ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(15) ORDER BY prng.naz_glowna;
+
+--LEFT INCLUSIVE
+SELECT prng.naz_glowna, igolomia_swrs_l.idmphp FROM prng LEFT JOIN igolomia_swrs_l ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(15) ORDER BY prng.naz_glowna;
+
+-- RIGHT INCLUSIVE
+SELECT prng.naz_glowna, igolomia_swrs_l.idmphp FROM prng RIGHT JOIN igolomia_swrs_l ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(15) ORDER BY prng.naz_glowna;
+
+--LEFT EXCLUSIVE
+SELECT prng.naz_glowna, igolomia_swrs_l.idmphp FROM prng LEFT JOIN igolomia_swrs_l ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(15) WHERE igolomia_swrs_l.idmphp::varchar(15) IS NULL ORDER BY prng.naz_glowna;
+
+--RIGHT EXCLUSIVE
+SELECT prng.naz_glowna, igolomia_swrs_l.idmphp FROM prng RIGHT JOIN igolomia_swrs_l ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(15) WHERE prng.id_zew IS NULL ORDER BY prng.naz_glowna;
+
+--FULL OUTER INCLUSIVE
+SELECT prng.naz_glowna, igolomia_swrs_l.idmphp FROM prng FULL OUTER JOIN igolomia_swrs_l ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(15) ORDER BY prng.naz_glowna;
+
+--FULL OUTER EXCLUSIVE
+SELECT prng.naz_glowna, igolomia_swrs_l.idmphp FROM prng FULL JOIN igolomia_swrs_l ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(15) WHERE prng.id_zew IS NULL OR igolomia_swrs_l.idmphp::varchar(15) IS NULL ORDER BY prng.naz_glowna;
+
+
+-- Które cieki w SWRS nie mają swojego odpowiednika w PRNG i ile jest takich obiektów w tabeli?
+
+SELECT DISTINCT igolomia_swrs_l.idmphp, COUNT(*) AS "liczba obiektów"
+FROM prng
+RIGHT JOIN igolomia_swrs_l
+ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(15)
+WHERE prng.id_zew
+IS NULL GROUP BY igolomia_swrs_l.idmphp
+ORDER BY igolomia_swrs_l.idmphp;
+
+
+--Zadanka --zrobić wikok podsumowujący istniejące w PRNG cieki (idmphp) i ich nazwy --jw. dla BDOT10k
+CREATE VIEW cieki_prng
+AS SELECT naz_glowna, rodzaj_obi
+FROM prng
+WHERE sys_zew = 'MPHP'
+GROUP BY naz_glowna, rodzaj_obi;
+
+-- --Zrobić widok z podsumowaniem cieków w DBOT10k, nazwa (lub jej brak ) i długość cieku
+SELECT DISTINCT naz_glowna, ST_LENGTH(igolomia_swrs_l.geom)
+FROM igolomia_swrs_l
+LEFT JOIN prng
+ON prng.id_zew = igolomia_swrs_l.idmphp::varchar(10);
+
+-- policzyć gęstość zaludnienia w miejscowościach (administracyjnych),
+SELECT nazwa,liczbamies, round(cast(ST_Area(geom)/1000000 as numeric),2) AS powierzchnia,
+round((liczbamies/(ST_Area(geom)/1000000))::numeric,0) AS "liczba mieszk/km2"
+FROM igolomia_adms_a
+WHERE x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07'
+ORDER BY powierzchnia DESC;
+
+
+-- policzyć gęstość zaludnienia w miejscowościach we wszelich jednostkach
+SELECT nazwa,liczbamies, round(cast(ST_Area(geom)/1000000 as numeric),2) AS powierzchnia,
+round((liczbamies/(ST_Area(geom)/1000000))::numeric,0) AS "liczba mieszk/km2"
+FROM igolomia_adms_a
+ORDER BY powierzchnia DESC;
+
+-- policzyć gęstość zaludnienia w obrębach
+SELECT nazwa,liczbamies, round(cast(ST_Area(igolomia_adms_a.geom)/1000000 as numeric),2) AS powierzchnia,
+round((liczbamies/(ST_Area(igolomia_adms_a.geom)/1000000))::numeric,0) AS "liczba mieszk/km2"
+FROM igolomia_adms_a
+JOIN obreby_igolomia
+ON obreby_igolomia.jpt_nazwa_ = igolomia_adms_a.nazwa
+WHERE x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07'
+ORDER BY powierzchnia DESC;
+
+
+-- - DLA CHĘTNYCH --sprawdzić czy obręby == się miejscowościom (ST_Equals),
+SELECT count(*) FROM obreby_igolomia;
+SELECT count(*) FROM igolomia_adms_a WHERE x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07';
+
+SELECT st_equals(obreby_igolomia.geom, igolomia_adms_a.geom)
+FROM igolomia_adms_a
+JOIN obreby_igolomia
+ON obreby_igolomia.jpt_nazwa_ = igolomia_adms_a.nazwa
+WHERE x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07';
+
+SELECT nazwa, jpt_nazwa_
+FROM igolomia_adms_a
+JOIN obreby_igolomia
+ON obreby_igolomia.jpt_nazwa_ = igolomia_adms_a.nazwa
+WHERE x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07';
+
+SELECT a.nazwa, o.jpt_nazwa_
+FROM igolomia_adms_a as a
+FULL JOIN obreby_igolomia as o ON a.nazwa = o.jpt_nazwa_
+WHERE a.x_kod = 'ADMS01' OR a.x_kod = 'ADMS03' OR a.x_kod = 'ADMS07' OR a.x_kod IS NULL;
+
+SELECT a.nazwa
+FROM igolomia_adms_a as a
+JOIN obreby_igolomia as o ON ST_Equals(a.geom, o.geom)
+WHERE a.x_kod = 'ADMS01' OR a.x_kod = 'ADMS03' OR a.x_kod = 'ADMS07';
+
+SELECT a.nazwa, st_area(a.geom)/10000 as pow_a, o.jpt_nazwa_, st_area(o.geom)/10000 as pow_p
+FROM igolomia_adms_a as a
+FULL JOIN obreby_igolomia as o ON a.nazwa = o.jpt_nazwa_
+WHERE a.x_kod = 'ADMS01' OR a.x_kod = 'ADMS03' OR a.x_kod = 'ADMS07' OR a.x_kod IS NULL;
+
+
+-- slowniki
+DROP TABLE IF EXISTS bubd_katistni;
+CREATE TABLE bubd_katistni (opis varchar(20), skrot varchar(3));
+INSERT INTO bubd_katistni VALUES ('eksploatowany','EKS');
+INSERT INTO bubd_katistni VALUES ('w budowie','Bud');
+INSERT INTO bubd_katistni VALUES ('zniszczony','Zns');
+INSERT INTO bubd_katistni VALUES ('tymczasowy','Tmc');
+INSERT INTO bubd_katistni VALUES ('nieczynny','Ncn');
+SELECT * FROM bubd_katistni;
+
+drop table if exists kategoria_zarządzania_skdr;
+create table kategoria_zarządzania_skdr (KOD varchar(1), Znaczenie varchar(10));
+insert into kategoria_zarządzania_skdr values ('K','Krajowa'), ('W','Wojewódzka'), ('P','Powiatowa'), ('G','Gminna'), ('Z','Zakładowa'), ('I','Inna');
+select * from kategoria_zarządzania_skdr;
+
+drop table if exists adms_rodzaj;
+create table adms_rodzaj ( x_kod varchar(8), nazwa varchar(50) );
+insert into adms_rodzaj values ('ADMS01', 'miasto');
+insert into adms_rodzaj values ('ADMS02', 'czesc miasta');
+insert into adms_rodzaj values ('ADMS03', 'wies');
+insert into adms_rodzaj values ('ADMS04', 'czesc wsi');
+insert into adms_rodzaj values ('ADMS05', 'kolonia');
+insert into adms_rodzaj values ('ADMS06', 'czesc kolonii');
+insert into adms_rodzaj values ('ADMS07', 'osada');
+insert into adms_rodzaj values ('ADMS08', 'czesc osady');
+insert into adms_rodzaj values ('ADMS09', 'osiedle');
+insert into adms_rodzaj values ('ADMS010', 'przysiolek');
+insert into adms_rodzaj values ('ADMS011', 'lesniczowka');
+insert into adms_rodzaj values ('ADMS012', 'gajowka');
+insert into adms_rodzaj values ('ADMS013', 'inny obiekt');
+alter table adms_rodzaj add primary key (kod);
+select * from adms_rodzaj;
+
+-- miejscowosc, klasa, material naw, kat_zarz
+drop table klasa_drogi;
+create table klasa_drogi ( klasa_drogi varchar(28), kod varchar(2));
+insert into klasa_drogi values ('autostrada','A'),('ekspresowa','S'),
+                               ('główna ruchu przyspieszonego','GP'),
+                               ('główna','G'),('zbiorcza','Z'),
+                               ('lokalna','L'),('dojazdowa','D'),
+                               ('inna','I');
+select * from klasa_drogi;
+
+create table material_nawierzchni_drogg( kod varchar(2), nazwa_pelna varchar(30));
+insert into material_nawierzchni_drogg values ('Bt','beton');
+insert into material_nawierzchni_drogg values ('Br', 'bruk');
+insert into material_nawierzchni_drogg values ('Kl', 'klinkier');
+insert into material_nawierzchni_drogg values ('Kk', 'kostka kamienna');
+insert into material_nawierzchni_drogg values ('Kp', 'kostka_prefabrykowana');
+insert into material_nawierzchni_drogg values ('Mb', 'masa_bitumiczna');
+insert into material_nawierzchni_drogg values ('Pb', 'płyty_betonowe');
+insert into material_nawierzchni_drogg values ('Tl', 'tłuczeń');
+insert into material_nawierzchni_drogg values ('Zw', 'żwir');
+insert into material_nawierzchni_drogg values ('Gr', 'grunt_naturlany');
+insert into material_nawierzchni_drogg values ('Gz', 'stablizacja_żwirem');
+insert into material_nawierzchni_drogg values ('T', 'nawierzchnia_twarda');
+insert into material_nawierzchni_drogg values ('U', 'nawierzchnia_utwardzona');
+insert into material_nawierzchni_drogg values ('G', 'nawierzchnia_gruntowa');
+select * from material_nawierzchni_drogg;
+
+
+-- Pytanie nr 1
+-- Jaka jest długość dróg poszczególnych klas, materiału nawierzchni i
+-- kategorii zarządzania w poszczególnych miejscowościach (administracyjnych)?
+
+-- klasa nawierzchni
+SELECT round(cast(sum(ST_LENGTH(igolomia_skdr_l.geom))as numeric) , 2) as dlugosc,
+igolomia_skdr_l.x_kod,
+klasa_drogi.klasa_drogi,
+klasa_drogi.kod
+FROM igolomia_skdr_l
+JOIN igolomia_adms_a ON ST_Intersects(igolomia_skdr_l.geom, igolomia_adms_a.geom)
+LEFT JOIN klasa_drogi ON igolomia_skdr_l.klasadrogi = klasa_drogi.kod
+GROUP BY klasa_drogi.klasa_drogi, kod,igolomia_skdr_l.x_kod;
+
+-- material nawierzchni
+SELECT round(cast(sum(ST_LENGTH(igolomia_skdr_l.geom))as numeric) , 2) as dlugosc,
+igolomia_skdr_l.materialna,
+material_nawierzchni_drogg.nazwa_pelna,
+material_nawierzchni_drogg.kod
+FROM igolomia_skdr_l
+JOIN igolomia_adms_a ON ST_Intersects(igolomia_skdr_l.geom, igolomia_adms_a.geom)
+LEFT JOIN material_nawierzchni_drogg ON igolomia_skdr_l.materialna = material_nawierzchni_drogg.kod
+GROUP BY material_nawierzchni_drogg.nazwa_pelna, material_nawierzchni_drogg.kod, igolomia_skdr_l.materialna;
+
+-- kategoria zarzadzania
+SELECT round(cast(sum(ST_LENGTH(igolomia_skdr_l.geom))as numeric) , 2) as dlugosc,
+igolomia_skdr_l.katzarzadz,
+kategoria_zarządzania_skdr.znaczenie,
+kategoria_zarządzania_skdr.kod
+FROM igolomia_skdr_l
+JOIN igolomia_adms_a ON ST_Intersects(igolomia_skdr_l.geom, igolomia_adms_a.geom)
+LEFT JOIN kategoria_zarządzania_skdr ON igolomia_skdr_l.katzarzadz = kategoria_zarządzania_skdr.kod
+GROUP BY kategoria_zarządzania_skdr.kod,igolomia_skdr_l.katzarzadz,kategoria_zarządzania_skdr.znaczenie;
+
+
+-- pytanie 2
+-- Jaka jest średnia gęstość zaludnienia w gminie? (funkcja avg)
+
+CREATE VIEW gestosc_zaludniednia_gmina AS SELECT nazwa,liczbamies, round(cast(ST_Area(geom)/1000000 as numeric),2) AS powierzchnia,
+round((liczbamies/(ST_Area(geom)/1000000))::numeric,0) AS "liczba mieszk/km2"
+from igolomia_adms_a
+where x_kod = 'ADMS01' OR x_kod = 'ADMS03' OR x_kod = 'ADMS07'
+ORDER BY powierzchnia DESC;
+
+SELECT avg(gestosc_zaludniednia_gmina."liczba mieszk/km2")
+FROM gestosc_zaludniednia_gmina;
+
+
+-- pytanie 3
+-- Jaka jest gestosc drog na 1km2
+
+SELECT ((sum(ST_LENGTH(igolomia_skdr_l.geom))/1000))/(ST_Area(gminy_igolomia.geom)/1000000)
+FROM igolomia_skdr_l,gminy_igolomia
+group by gminy_igolomia.geom;
+
+
+-- pytanie 4
+-- Jaka jest gęstość dróg o poszczególnych materiałach nawierzchni na 1km2?
+
+SELECT round(((sum(ST_LENGTH(igolomia_skdr_l.geom))/1000))::numeric/(ST_Area(gminy_igolomia.geom)/1000000)::numeric,2) as "gestosc drog", materialna
+FROM gminy_igolomia,igolomia_skdr_l
+LEFT JOIN material_nawierzchni_drogg ON igolomia_skdr_l.materialna = material_nawierzchni_drogg.kod
+group by gminy_igolomia.geom,materialna;
+
+
+-- pytanie 5
+-- Jaka jest ilość osób przypadająca na jeden budynek mieszkalny w poszczególnych miejscowościach?
+
+CREATE VIEW ilosc_budynkow AS
+SELECT count(igolomia_bubd_a) AS "ilosc budynkow",igolomia_adms_a.nazwa
+FROM igolomia_bubd_a
+JOIN igolomia_adms_a ON ST_Intersects(igolomia_bubd_a.geom, igolomia_adms_a.geom)
+WHERE (igolomia_adms_a.x_kod = 'ADMS01' OR igolomia_adms_a.x_kod = 'ADMS03' OR igolomia_adms_a.x_kod = 'ADMS07')
+AND (igolomia_bubd_a.x_kod = 'BUBD01' OR igolomia_bubd_a.x_kod = 'BUBD02' OR igolomia_bubd_a.x_kod = 'BUBD03' OR igolomia_bubd_a.x_kod = 'BUBD04')
+GROUP BY igolomia_adms_a.nazwa;
+
+CREATE VIEW ilosc_mieszkancow AS SELECT igolomia_adms_a.liczbamies as "ilosc mieszkancow",igolomia_adms_a.nazwa
+FROM igolomia_adms_a
+WHERE igolomia_adms_a.x_kod = 'ADMS01' OR igolomia_adms_a.x_kod = 'ADMS03' OR igolomia_adms_a.x_kod = 'ADMS07'
+GROUP BY igolomia_adms_a.nazwa,igolomia_adms_a.liczbamies;
+
+CREATE VIEW mieszk_na_jeden_budynek AS
+SELECT "ilosc budynkow","ilosc mieszkancow",ilosc_mieszkancow.nazwa, round("ilosc mieszkancow"::numeric/"ilosc budynkow"::numeric,2) as "ilosc mieszkancow na 1 budynek"
+FROM ilosc_budynkow, ilosc_mieszkancow
+WHERE ilosc_budynkow.nazwa = ilosc_mieszkancow.nazwa;
+
+
+-- pytanie 6
+-- Jaka jest średnia ilość osób przypadająca na 1 budynek mieszkalny?
+
+SELECT round(avg("ilosc mieszkancow na 1 budynek"),2) FROM mieszk_na_jeden_budynek;
+
+
+-- pytanie 7
+-- Jakie są nazwy cieków przepływające przez poszczególne miejscowości wraz z długością cieków?
+
+SELECT  rzeki_nazwy.nazwa ,sum(ST_LENGTH(rzeki_nazwy.geom)/1000) as "dlugosc w km",igolomia_adms_a.nazwa
+FROM rzeki_nazwy
+JOIN igolomia_adms_a
+ON ST_Intersects(rzeki_nazwy.geom, igolomia_adms_a.geom)
+WHERE igolomia_adms_a.x_kod = 'ADMS01' OR igolomia_adms_a.x_kod = 'ADMS03' OR igolomia_adms_a.x_kod = 'ADMS07'
+GROUP BY igolomia_adms_a.nazwa,rzeki_nazwy.nazwa;
